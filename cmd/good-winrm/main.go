@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/masterzen/winrm"
+	"golang.org/x/term"
 )
 
 /*
@@ -28,7 +29,7 @@ func main() {
 		return &winrm.ClientNTLM{}
 	}
 
-	client, err := winrm.NewClientWithParameters(endpoint, "Administrator", "", params)
+	client, err := winrm.NewClientWithParameters(endpoint, "Administrator", os.Args[1], params)
 	if err != nil {
 		panic(err)
 	}
@@ -45,19 +46,37 @@ func main() {
 	}
 	defer ps.Close()
 
-	go io.Copy(os.Stdout, ps.Stdout)
-	// go readStdout(ps.Stdout)
+	// Save original terminal state
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		panic(err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	go readStdout(ps.Stdout)
 	go io.Copy(os.Stderr, ps.Stderr)
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		// raw doesnt play nice, and winrm prints after newline
-		input, err := reader.ReadString('\n')
+		// want gdb style
+		r, _, err := reader.ReadRune()
 		if err != nil {
 			break
 		}
-		_, err = ps.Stdin.Write([]byte(input))
+
+		// Convert CR to CRLF
+		if r == '\r' {
+			os.Stdin.Write([]byte(string(r)))
+			r = '\n'
+		}
+
+		_, err = ps.Stdin.Write([]byte(string(r)))
 		if err != nil {
+			break
+		}
+
+		// Break on Ctrl+D or Ctrl+C
+		if r == '\x04' || r == '\x03' {
 			break
 		}
 	}
@@ -65,28 +84,17 @@ func main() {
 
 func readStdout(stdout io.Reader) {
 	reader := bufio.NewReader(stdout)
-	var line string
-	input := "echo hello\n"
 	for {
 		r, _, err := reader.ReadRune()
 		if err != nil {
 			break
 		}
-		line += string(r)
+
 		if r == '\n' {
-			line = ""
+			os.Stdout.Write([]byte{'\r'})
 		}
 
-		// skip echoing input line
-		var found bool
-		for i := range min(len(input), len(line)) {
-			if line[i] != input[i] {
-				break
-			}
-		}
-
-		if !found {
-			os.Stdout.Write([]byte(string(r)))
-		}
+		os.Stdout.Write([]byte(string(r)))
+		os.Stdout.Sync()
 	}
 }

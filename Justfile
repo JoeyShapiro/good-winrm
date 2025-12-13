@@ -9,10 +9,15 @@ setup:
 
 vm:
     qemu-system-x86_64 \
+        -machine q35 \
         -m 8100 \
-        -smp 2 \
+        -display none \
+        -smp 6 \
         -drive file=testfiles/windows-core-2016.qcow2,format=qcow2 \
         -net nic -net user,hostfwd=tcp::5985-:5985,hostfwd=tcp::5986-:5986
 
 build:
     go build .
+
+release:
+    go build -ldflags="-s -w" .
