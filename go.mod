@@ -4,6 +4,8 @@ go 1.24.1
 
 require github.com/masterzen/winrm v0.0.0-20250927112105-5f8e6c707321
 
+require golang.org/x/sys v0.39.0 // indirect
+
 require (
 	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
 	github.com/ChrisTrenkamp/goxpath v0.0.0-20210404020558-97928f7e12b6 // indirect
@@ -23,5 +25,6 @@ require (
 	github.com/tidwall/transform v0.0.0-20201103190739-32f242e2dbde // indirect
 	golang.org/x/crypto v0.24.0 // indirect
 	golang.org/x/net v0.21.0 // indirect
+	golang.org/x/term v0.38.0
 	golang.org/x/text v0.16.0 // indirect
 )
