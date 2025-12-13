@@ -17,7 +17,7 @@ vm:
         -net nic -net user,hostfwd=tcp::5985-:5985,hostfwd=tcp::5986-:5986
 
 build:
-    go build .
+    go build ./cmd/good-winrm
 
 release:
-    go build -ldflags="-s -w" .
+    go build -ldflags="-s -w" ./cmd/good-winrm
