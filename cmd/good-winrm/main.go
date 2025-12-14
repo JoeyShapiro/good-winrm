@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -29,14 +30,22 @@ var (
 )
 
 func main() {
-	endpoint := winrm.NewEndpoint("localhost", 5985, false, false, nil, nil, nil, 0)
+	host := flag.String("host", "localhost", "WinRM host")
+	port := flag.Int("port", 5985, "WinRM port")
+	username := flag.String("username", "Administrator", "WinRM username")
+	password := flag.String("password", "", "WinRM password")
+	command := flag.String("command", "powershell.exe", "Command to execute")
+
+	flag.Parse()
+
+	endpoint := winrm.NewEndpoint(*host, *port, false, false, nil, nil, nil, 0)
 	params := winrm.DefaultParameters
 
 	params.TransportDecorator = func() winrm.Transporter {
 		return &winrm.ClientNTLM{}
 	}
 
-	client, err := winrm.NewClientWithParameters(endpoint, "Administrator", os.Args[1], params)
+	client, err := winrm.NewClientWithParameters(endpoint, *username, *password, params)
 	if err != nil {
 		panic(err)
 	}
@@ -47,7 +56,7 @@ func main() {
 	}
 	defer shell.Close()
 
-	ps, err := shell.ExecuteWithContext(context.Background(), "powershell.exe")
+	ps, err := shell.ExecuteWithContext(context.Background(), *command)
 	if err != nil {
 		panic(err)
 	}
@@ -135,8 +144,10 @@ func readStdout(stdout io.Reader) {
 	reader := bufio.NewReader(stdout)
 	for {
 		r, _, err := reader.ReadRune()
-		if err != nil {
-			break
+		if err == io.EOF {
+			os.Exit(0)
+		} else if err != nil {
+			panic(err)
 		}
 
 		line += string(r)
