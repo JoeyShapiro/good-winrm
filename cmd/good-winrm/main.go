@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/masterzen/winrm"
 )
@@ -53,35 +56,40 @@ func main() {
 	go readStdout(ps.Stdout)
 	go io.Copy(os.Stderr, ps.Stderr)
 
+	// Create channel to receive signals
+	sigChan := make(chan os.Signal, 1)
+
+	// Register for SIGINT (Ctrl+C)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGINT)
+
+	go func() {
+		<-sigChan
+		// TODO change to something less common
+		// TODO how can i send this to the remote powershell?
+		// TODO maybe just do double tap
+		// Meta Terminal on Ctrl+C
+		state.IsMetaTerminal = true
+		fmt.Printf("\r\n\033[32m(good-winrm)\033[0m ")
+	}()
+
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		// want gdb style
 		state.Input, err = reader.ReadString('\n')
 		if err != nil {
-			break
+			panic(err)
 		}
 		state.Commanded = true
 
-		// TODO change to something less common
-		// Meta Terminal on Ctrl+C
-		// if r == '\x03' {
-		// 	state.IsMetaTerminal = true
-		// 	fmt.Printf("\r\n\033[31m(good-winrm)\033[0m ")
-		// 	continue
-		// }
-
 		if state.IsMetaTerminal {
-			os.Stdin.Write([]byte(state.Input))
-			// if r == '\n' {
-			// 	err := evalMetaCommand()
-			// 	if err != nil {
-			// 		fmt.Printf("Error: %v\r\n", err)
-			// 	}
-			// 	state.MetaCommand = ""
-			// 	if state.IsMetaTerminal {
-			// 		fmt.Printf("\033[31m(good-winrm)\033[0m ")
-			// 	}
-			// }
+			err := evalMetaCommand()
+			if err != nil {
+				fmt.Printf("Error: %v\r\n", err)
+			}
+			if state.IsMetaTerminal {
+				fmt.Printf("\033[32m(good-winrm)\033[0m ")
+			}
+			state.Commanded = false
 		} else {
 			_, err = ps.Stdin.Write([]byte(state.Input))
 			if err != nil {
@@ -93,21 +101,20 @@ func main() {
 
 type State struct {
 	IsMetaTerminal bool
-	MetaCommand    string
 	Input          string
 	Commanded      bool
 }
 
 func evalMetaCommand() error {
-	if state.MetaCommand == "" {
+	if state.Input == "" {
 		return nil
 	}
 
-	switch state.MetaCommand {
+	switch state.Input {
 	case "exit":
 		state.IsMetaTerminal = false
 	default:
-		return errors.New("Unknown meta command: " + state.MetaCommand)
+		return errors.New("Unknown meta command: " + state.Input)
 	}
 	return nil
 }
