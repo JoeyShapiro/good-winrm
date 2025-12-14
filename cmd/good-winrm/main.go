@@ -4,12 +4,10 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 
 	"github.com/masterzen/winrm"
-	"golang.org/x/term"
 )
 
 /*
@@ -52,63 +50,43 @@ func main() {
 	}
 	defer ps.Close()
 
-	// Save original terminal state
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		panic(err)
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-
 	go readStdout(ps.Stdout)
 	go io.Copy(os.Stderr, ps.Stderr)
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		// want gdb style
-		r, _, err := reader.ReadRune()
+		state.Input, err = reader.ReadString('\n')
 		if err != nil {
 			break
 		}
-		s := string(r)
+		state.Commanded = true
 
-		// Convert CR to CRLF
-		if r == '\r' {
-			os.Stdin.Write([]byte(s))
-			r = '\n'
-			s = string(r)
-		}
-
+		// TODO change to something less common
 		// Meta Terminal on Ctrl+C
-		if r == '\x03' {
-			state.IsMetaTerminal = true
-			fmt.Printf("\r\n\033[31m(good-winrm)\033[0m ")
-			continue
-		}
+		// if r == '\x03' {
+		// 	state.IsMetaTerminal = true
+		// 	fmt.Printf("\r\n\033[31m(good-winrm)\033[0m ")
+		// 	continue
+		// }
 
 		if state.IsMetaTerminal {
-			os.Stdin.Write([]byte(s))
-			if r == '\n' {
-				err := evalMetaCommand()
-				if err != nil {
-					fmt.Printf("Error: %v\r\n", err)
-				}
-				state.MetaCommand = ""
-				if state.IsMetaTerminal {
-					fmt.Printf("\033[31m(good-winrm)\033[0m ")
-				}
-			} else {
-				state.MetaCommand += s
-			}
+			os.Stdin.Write([]byte(state.Input))
+			// if r == '\n' {
+			// 	err := evalMetaCommand()
+			// 	if err != nil {
+			// 		fmt.Printf("Error: %v\r\n", err)
+			// 	}
+			// 	state.MetaCommand = ""
+			// 	if state.IsMetaTerminal {
+			// 		fmt.Printf("\033[31m(good-winrm)\033[0m ")
+			// 	}
+			// }
 		} else {
-			_, err = ps.Stdin.Write([]byte(s))
+			_, err = ps.Stdin.Write([]byte(state.Input))
 			if err != nil {
 				break
 			}
-		}
-
-		// Break on Ctrl+D
-		if r == '\x04' {
-			break
 		}
 	}
 }
@@ -116,6 +94,8 @@ func main() {
 type State struct {
 	IsMetaTerminal bool
 	MetaCommand    string
+	Input          string
+	Commanded      bool
 }
 
 func evalMetaCommand() error {
@@ -133,6 +113,7 @@ func evalMetaCommand() error {
 }
 
 func readStdout(stdout io.Reader) {
+	var line string
 	reader := bufio.NewReader(stdout)
 	for {
 		r, _, err := reader.ReadRune()
@@ -140,11 +121,15 @@ func readStdout(stdout io.Reader) {
 			break
 		}
 
-		if r == '\n' {
-			os.Stdout.Write([]byte{'\r'})
+		line += string(r)
+		n := min(len(line), len(state.Input))
+		if state.Commanded && len(line) == len(state.Input) && line[:n] == state.Input[:n] {
+			state.Commanded = false
+			line = ""
+		} else if !state.Commanded || line[:n] != state.Input[:n] {
+			os.Stdout.Write([]byte(line))
+			os.Stdout.Sync()
+			line = ""
 		}
-
-		os.Stdout.Write([]byte(string(r)))
-		os.Stdout.Sync()
 	}
 }
