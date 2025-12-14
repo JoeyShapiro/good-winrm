@@ -69,14 +69,21 @@ func main() {
 		// TODO maybe just do double tap
 		// Meta Terminal on Ctrl+C
 		state.IsMetaTerminal = true
-		fmt.Printf("\r\n\033[32m(good-winrm)\033[0m ")
+		fmt.Printf("\n\033[32m(good-winrm)\033[0m ")
 	}()
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		// want gdb style
 		state.Input, err = reader.ReadString('\n')
-		if err != nil {
+		if err == io.EOF {
+			if state.IsMetaTerminal {
+				state.IsMetaTerminal = false
+				fmt.Printf("\n")
+				continue
+			} else {
+				break
+			}
+		} else if err != nil {
 			panic(err)
 		}
 		state.Commanded = true
@@ -84,7 +91,7 @@ func main() {
 		if state.IsMetaTerminal {
 			err := evalMetaCommand()
 			if err != nil {
-				fmt.Printf("Error: %v\r\n", err)
+				fmt.Printf("Error: %v\n", err)
 			}
 			if state.IsMetaTerminal {
 				fmt.Printf("\033[32m(good-winrm)\033[0m ")
@@ -113,6 +120,10 @@ func evalMetaCommand() error {
 	switch state.Input {
 	case "exit":
 		state.IsMetaTerminal = false
+	case "upload":
+		// TODO
+	case "download":
+		// TODO
 	default:
 		return errors.New("Unknown meta command: " + state.Input)
 	}
