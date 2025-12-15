@@ -13,6 +13,7 @@ require (
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/gofrs/uuid v4.4.0+incompatible // indirect
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect

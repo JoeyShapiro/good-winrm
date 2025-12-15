@@ -2,15 +2,19 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/google/shlex"
 	"github.com/masterzen/winrm"
 )
 
@@ -45,12 +49,13 @@ func main() {
 		return &winrm.ClientNTLM{}
 	}
 
-	client, err := winrm.NewClientWithParameters(endpoint, *username, *password, params)
+	var err error
+	state.Client, err = winrm.NewClientWithParameters(endpoint, *username, *password, params)
 	if err != nil {
 		panic(err)
 	}
 
-	shell, err := client.CreateShell()
+	shell, err := state.Client.CreateShell()
 	if err != nil {
 		panic(err)
 	}
@@ -119,6 +124,7 @@ type State struct {
 	IsMetaTerminal bool
 	Input          string
 	Commanded      bool
+	Client         *winrm.Client
 }
 
 func evalMetaCommand() error {
@@ -126,11 +132,26 @@ func evalMetaCommand() error {
 		return nil
 	}
 
-	switch state.Input {
+	args, err := shlex.Split(state.Input)
+	if err != nil {
+		return err
+	}
+
+	if len(args) == 0 {
+		return nil
+	}
+
+	switch args[0] {
 	case "exit":
 		state.IsMetaTerminal = false
 	case "upload":
-		// TODO
+		if len(args) != 3 {
+			return errors.New("usage: upload <local_path> <remote_path>")
+		}
+		err := uploadFile(state.Client, args[1], args[2])
+		if err != nil {
+			return err
+		}
 	case "download":
 		// TODO
 	default:
@@ -161,4 +182,76 @@ func readStdout(stdout io.Reader) {
 			line = ""
 		}
 	}
+}
+
+func uploadFile(client *winrm.Client, localPath, remotePath string) error {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+
+	// First, delete if exists
+	_, err = client.RunWithContext(context.Background(), fmt.Sprintf("Remove-Item -Path '%s' -Force -ErrorAction SilentlyContinue", remotePath), nil, nil)
+	if err != nil {
+		return err
+	}
+
+	// Chunk size (stay well under 8KB command limit)
+	chunkSize := 5000
+
+	/*
+		# Create the file stream
+		$stream = [System.IO.File]::Create('C:\target\file.exe')
+
+		# For each chunk (sent as separate commands):
+		$bytes = [System.Convert]::FromBase64String('ENCODED_CHUNK')
+		$stream.Write($bytes, 0, $bytes.Length)
+
+		# Finally:
+		$stream.Close()
+	*/
+
+	for i := 0; i < len(data); i += chunkSize {
+		end := min(i+chunkSize, len(data))
+
+		chunk := data[i:end]
+		encoded := base64.StdEncoding.EncodeToString(chunk)
+
+		// Append each chunk
+		psCommand := fmt.Sprintf(`
+            $data = [System.Convert]::FromBase64String('%s')
+            Add-Content -Path '%s' -Value $data -Encoding Byte
+        `, encoded, remotePath)
+
+		_, err = client.RunWithContext(context.Background(), psCommand, os.Stdout, os.Stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s: %d%% (%d/%d) bytes uploaded\n", remotePath, end*100/len(data), end, len(data))
+	}
+
+	return nil
+}
+
+func downloadFile(client *winrm.Client, remotePath, localPath string) error {
+	// Read and encode on remote side
+	psCommand := fmt.Sprintf(`
+        $data = [System.IO.File]::ReadAllBytes('%s')
+        [System.Convert]::ToBase64String($data)
+    `, remotePath)
+
+	var stdout bytes.Buffer
+	_, err := client.RunWithContext(context.Background(), psCommand, &stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+
+	// Decode
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(stdout.String()))
+	if err != nil {
+		return err
+	}
+
+	// Write locally
+	return os.WriteFile(localPath, decoded, 0600)
 }
