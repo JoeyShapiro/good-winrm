@@ -105,7 +105,7 @@ func main() {
 		if state.IsMetaTerminal {
 			err := evalMetaCommand()
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				fmt.Printf("error: %v\n", err)
 			}
 			if state.IsMetaTerminal {
 				fmt.Printf("\033[32m(good-winrm)\033[0m ")
@@ -146,18 +146,20 @@ func evalMetaCommand() error {
 		state.IsMetaTerminal = false
 	case "upload":
 		if len(args) != 3 {
-			return errors.New("usage: upload <local_path> <remote_path>")
-		}
-		err := uploadFile(state.Client, args[1], args[2])
-		if err != nil {
-			return err
+			err = errors.New("usage: upload <local_path> <remote_path>")
+		} else {
+			err = uploadFile(state.Client, args[1], args[2])
 		}
 	case "download":
-		// TODO
+		if len(args) != 3 {
+			err = errors.New("usage: download <remote_path> <local_path>")
+		} else {
+			err = downloadFile(state.Client, args[1], args[2])
+		}
 	default:
-		return errors.New("Unknown meta command: " + state.Input)
+		err = errors.New("unknown meta command: " + state.Input)
 	}
-	return nil
+	return err
 }
 
 func readStdout(stdout io.Reader) {
