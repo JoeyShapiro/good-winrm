@@ -193,9 +193,11 @@ func uploadFile(client *winrm.Client, localPath, remotePath string) error {
 	}
 
 	// First, delete if exists
-	_, err = client.RunWithContext(context.Background(), fmt.Sprintf("Remove-Item -Path '%s' -Force -ErrorAction SilentlyContinue", remotePath), nil, nil)
+	_, stderr, _, err := client.RunPSWithContext(context.Background(), fmt.Sprintf("Remove-Item -Path '%s' -Force -ErrorAction SilentlyContinue", remotePath))
 	if err != nil {
 		return err
+	} else if stderr != "" {
+		return errors.New(stderr)
 	}
 
 	// Chunk size (stay well under 8KB command limit)
@@ -225,9 +227,11 @@ func uploadFile(client *winrm.Client, localPath, remotePath string) error {
             Add-Content -Path '%s' -Value $data -Encoding Byte
         `, encoded, remotePath)
 
-		_, err = client.RunWithContext(context.Background(), psCommand, os.Stdout, os.Stderr)
+		_, stderr, _, err := client.RunPSWithContext(context.Background(), psCommand)
 		if err != nil {
 			return err
+		} else if stderr != "" {
+			return errors.New(stderr)
 		}
 		fmt.Printf("%s: %d%% (%d/%d) bytes uploaded\n", remotePath, end*100/len(data), end, len(data))
 	}
