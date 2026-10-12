@@ -2,7 +2,12 @@ module good-winrm
 
 go 1.24.1
 
-require github.com/masterzen/winrm v0.0.0-20261004123143-57b335310d59
+require (
+	github.com/masterzen/winrm v0.0.0-20261004123143-57b335310d59
+	golang.org/x/term v0.36.0
+)
+
+require golang.org/x/sys v0.37.0 // indirect
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.2-0.20260824092057-1c8077778c2c // indirect

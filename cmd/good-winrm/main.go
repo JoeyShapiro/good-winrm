@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"strings"
 	"sync"
 
@@ -49,27 +50,53 @@ func main() {
 }
 
 func run() error {
-	host := flag.String("host", "localhost", "WinRM host")
-	port := flag.Int("port", 5985, "WinRM port")
-	username := flag.String("username", "Administrator", "WinRM username")
-	password := flag.String("password", "notJo3y!", "WinRM password")
-	command := flag.String("command", "powershell.exe", "Command to execute")
+	fs := flag.NewFlagSet("good-winrm", flag.ExitOnError)
+	port := fs.Int("port", 5985, "WinRM port")
+	command := fs.String("command", "powershell.exe", "Command to execute")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: good-winrm [user@]host [--port 5985] [--command powershell.exe]\n")
+		fs.PrintDefaults()
+	}
 
-	flag.Parse()
+	// flag stops at the first positional argument, so parse again after it
+	// to allow flags on either side of the destination.
+	fs.Parse(os.Args[1:])
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+	destination := fs.Arg(0)
+	fs.Parse(fs.Args()[1:])
+	if fs.NArg() > 0 {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	username, host, err := parseDestination(destination)
+	if err != nil {
+		return err
+	}
 
 	stdinFd := int(os.Stdin.Fd())
 	if !term.IsTerminal(stdinFd) {
 		return errors.New("stdin must be a terminal")
 	}
 
-	endpoint := winrm.NewEndpoint(*host, *port, false, false, nil, nil, nil, 0)
+	fmt.Fprintf(os.Stderr, "%s@%s's password: ", username, host)
+	password, err := term.ReadPassword(stdinFd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return err
+	}
+
+	endpoint := winrm.NewEndpoint(host, *port, false, false, nil, nil, nil, 0)
 	params := winrm.DefaultParameters
 
 	params.TransportDecorator = func() winrm.Transporter {
 		return &winrm.ClientNTLM{}
 	}
 
-	client, err := winrm.NewClientWithParameters(endpoint, *username, *password, params)
+	client, err := winrm.NewClientWithParameters(endpoint, username, string(password), params)
 	if err != nil {
 		return err
 	}
@@ -131,6 +158,25 @@ func run() error {
 			}
 		}
 	}
+}
+
+// parseDestination splits [user@]host, defaulting to the local username like
+// ssh does. The last @ is the separator, so user@domain.com@host works.
+func parseDestination(dest string) (username, host string, err error) {
+	if i := strings.LastIndex(dest, "@"); i >= 0 {
+		username, host = dest[:i], dest[i+1:]
+	} else {
+		u, err := user.Current()
+		if err != nil {
+			return "", "", err
+		}
+		// On Windows this is DOMAIN\user
+		username, host = u.Username, dest
+	}
+	if username == "" || host == "" {
+		return "", "", fmt.Errorf("invalid destination: %q", dest)
+	}
+	return username, host, nil
 }
 
 // readKeys forwards keypresses from raw stdin, dropping escape sequences
