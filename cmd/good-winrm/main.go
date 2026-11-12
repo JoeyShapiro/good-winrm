@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
-	"context"
-	"encoding/base64"
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,31 +12,15 @@ import (
 	"sync"
 
 	"github.com/google/shlex"
-	"github.com/masterzen/winrm"
 	"golang.org/x/term"
+
+	"good-winrm/connection"
+	"good-winrm/good_winrm"
+	"good-winrm/lineedit"
 )
 
-/*
-# Enable Basic auth
-Set-Item WSMan:\localhost\Service\Auth\Basic $true
-
-# Allow unencrypted traffic (HTTP)
-Set-Item WSMan:\localhost\Service\AllowUnencrypted $true
-
-# Restart WinRM
-Restart-Service WinRM
-*/
-
-// Keys we care about while stdin is in raw mode.
-const (
-	keyMetaToggle = 0x00 // Ctrl+` (terminals send NUL, same as Ctrl+@ / Ctrl+Space)
-	keyCtrlC      = 0x03
-	keyCtrlD      = 0x04
-	keyCtrlH      = 0x08
-	keyCtrlU      = 0x15
-	keyEsc        = 0x1b
-	keyBackspace  = 0x7f
-)
+// Ctrl+` toggles the meta terminal. Terminals send it as NUL.
+const keyMetaToggle = 0x00
 
 const metaPrompt = "\033[32m(good-winrm)\033[0m "
 
@@ -89,29 +71,11 @@ func run() error {
 		return err
 	}
 
-	endpoint := winrm.NewEndpoint(host, *port, false, false, nil, nil, nil, 0)
-	params := winrm.DefaultParameters
-
-	params.TransportDecorator = func() winrm.Transporter {
-		return &winrm.ClientNTLM{}
-	}
-
-	client, err := winrm.NewClientWithParameters(endpoint, username, string(password), params)
+	conn, err := good_winrm.NewWinrm(host, *port, username, string(password), *command)
 	if err != nil {
 		return err
 	}
-
-	shell, err := client.CreateShell()
-	if err != nil {
-		return err
-	}
-	defer shell.Close()
-
-	ps, err := shell.ExecuteWithContext(context.Background(), *command)
-	if err != nil {
-		return err
-	}
-	defer ps.Close()
+	defer conn.Close()
 
 	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
@@ -119,41 +83,50 @@ func run() error {
 	}
 	defer term.Restore(stdinFd, oldState)
 
-	s := &session{
-		client: client,
-		ps:     ps,
-		out:    &crlfWriter{w: os.Stdout},
-		echo:   &echoFilter{},
+	t := &terminal{
+		conn: conn,
+		out:  &crlfWriter{w: os.Stdout},
 	}
 
-	remoteDone := make(chan struct{})
+	remoteDone := make(chan error, 1)
 	go func() {
+		for {
+			p, err := conn.Receive()
+			if err != nil {
+				remoteDone <- err
+				return
+			}
+			t.out.Write(p)
+		}
+	}()
+
+	input := make(chan []byte)
+	go func() {
+		defer close(input)
 		buf := make([]byte, 4096)
 		for {
-			n, err := ps.Stdout.Read(buf)
+			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				s.out.Write(s.echo.filter(buf[:n]))
+				input <- append([]byte(nil), buf[:n]...)
 			}
 			if err != nil {
-				break
+				return
 			}
 		}
-		close(remoteDone)
 	}()
-	go io.Copy(&crlfWriter{w: os.Stderr}, ps.Stderr)
-
-	keys := make(chan rune)
-	go readKeys(bufio.NewReader(os.Stdin), keys)
 
 	for {
 		select {
-		case <-remoteDone:
-			return nil
-		case r, ok := <-keys:
+		case err := <-remoteDone:
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		case p, ok := <-input:
 			if !ok {
 				return nil
 			}
-			if err := s.handleKey(r); err != nil {
+			if err := t.handleInput(p); err != nil {
 				return err
 			}
 		}
@@ -179,107 +152,66 @@ func parseDestination(dest string) (username, host string, err error) {
 	return username, host, nil
 }
 
-// readKeys forwards keypresses from raw stdin, dropping escape sequences
-// (arrow keys, function keys, Alt+key) since there is no cursor movement.
-func readKeys(in *bufio.Reader, keys chan<- rune) {
-	defer close(keys)
+// terminal routes raw input either to the connection or, while toggled on,
+// to the meta terminal.
+type terminal struct {
+	conn   connection.Connection
+	out    io.Writer
+	meta   bool
+	editor lineedit.Editor
+}
+
+func (t *terminal) handleInput(p []byte) error {
 	for {
-		r, _, err := in.ReadRune()
-		if err != nil {
-			return
+		i := bytes.IndexByte(p, keyMetaToggle)
+		if i < 0 {
+			return t.send(p)
 		}
-		if r == keyEsc {
-			// A lone Esc arrives by itself; a sequence arrives in one read.
-			if in.Buffered() == 0 {
-				continue
-			}
-			next, _, _ := in.ReadRune()
-			if next == '[' || next == 'O' {
-				for in.Buffered() > 0 {
-					b, _ := in.ReadByte()
-					if b >= 0x40 && b <= 0x7e {
-						break
-					}
-				}
-			}
-			continue
+		if err := t.send(p[:i]); err != nil {
+			return err
 		}
-		keys <- r
+		t.toggleMeta()
+		p = p[i+1:]
 	}
 }
 
-// session does local line editing in raw mode and routes completed lines
-// either to the remote process or to the meta terminal.
-type session struct {
-	client *winrm.Client
-	ps     *winrm.Command
-	out    io.Writer
-	echo   *echoFilter
-	meta   bool
-	line   []rune
+func (t *terminal) toggleMeta() {
+	t.meta = !t.meta
+	t.editor.Reset()
+	fmt.Fprint(t.out, "\n")
+	if t.meta {
+		fmt.Fprint(t.out, metaPrompt)
+	}
 }
 
-func (s *session) handleKey(r rune) error {
-	switch r {
-	case keyMetaToggle:
-		s.line = nil
-		s.meta = !s.meta
-		fmt.Fprint(s.out, "\n")
-		if s.meta {
-			fmt.Fprint(s.out, metaPrompt)
-		}
-	case keyCtrlC:
-		s.line = nil
-		fmt.Fprint(s.out, "^C\n")
-		if s.meta {
-			fmt.Fprint(s.out, metaPrompt)
-		}
-	case keyCtrlD:
-		if len(s.line) > 0 {
-			return nil
-		}
-		if s.meta {
-			s.meta = false
-			fmt.Fprint(s.out, "\n")
-			return nil
-		}
-		// EOF on the remote stdin; the remote exits and stdout closes.
-		return s.ps.Stdin.Close()
-	case keyBackspace, keyCtrlH:
-		if len(s.line) > 0 {
-			s.line = s.line[:len(s.line)-1]
-			fmt.Fprint(s.out, "\b \b")
-		}
-	case keyCtrlU:
-		fmt.Fprint(s.out, strings.Repeat("\b \b", len(s.line)))
-		s.line = nil
-	case '\r', '\n':
-		input := string(s.line)
-		s.line = nil
-		fmt.Fprint(s.out, "\n")
-		if s.meta {
-			if err := s.evalMetaCommand(input); err != nil {
-				fmt.Fprintf(s.out, "error: %v\n", err)
+func (t *terminal) send(p []byte) error {
+	if len(p) == 0 {
+		return nil
+	}
+	if !t.meta {
+		return t.conn.Send(p)
+	}
+
+	echo, events := t.editor.Feed(p)
+	t.out.Write(echo)
+	for _, ev := range events {
+		switch ev.Kind {
+		case lineedit.Line:
+			if err := t.evalMetaCommand(ev.Line); err != nil {
+				fmt.Fprintf(t.out, "error: %v\n", err)
 			}
-			if s.meta {
-				fmt.Fprint(s.out, metaPrompt)
-			}
-			return nil
+		case lineedit.EOF:
+			t.meta = false
+			fmt.Fprint(t.out, "\n")
 		}
-		s.echo.expect(input + "\n")
-		_, err := s.ps.Stdin.Write([]byte(input + "\n"))
-		return err
-	default:
-		if r < 0x20 && r != '\t' {
-			return nil
+		if t.meta {
+			fmt.Fprint(t.out, metaPrompt)
 		}
-		s.line = append(s.line, r)
-		fmt.Fprint(s.out, string(r))
 	}
 	return nil
 }
 
-func (s *session) evalMetaCommand(input string) error {
+func (t *terminal) evalMetaCommand(input string) error {
 	args, err := shlex.Split(input)
 	if err != nil {
 		return err
@@ -291,65 +223,29 @@ func (s *session) evalMetaCommand(input string) error {
 
 	switch args[0] {
 	case "exit":
-		s.meta = false
+		t.meta = false
 	case "upload":
 		if len(args) != 3 {
 			return errors.New("usage: upload <local_path> <remote_path>")
 		}
-		return uploadFile(s.client, s.out, args[1], args[2])
+		u, ok := t.conn.(connection.Uploader)
+		if !ok {
+			return errors.New("upload is not supported by this connection")
+		}
+		return u.Upload(args[1], args[2], t.out)
 	case "download":
 		if len(args) != 3 {
 			return errors.New("usage: download <remote_path> <local_path>")
 		}
-		return downloadFile(s.client, s.out, args[1], args[2])
+		d, ok := t.conn.(connection.Downloader)
+		if !ok {
+			return errors.New("download is not supported by this connection")
+		}
+		return d.Download(args[1], args[2], t.out)
 	default:
 		return errors.New("unknown meta command: " + args[0])
 	}
 	return nil
-}
-
-// echoFilter drops the remote shell's echo of a line we sent, since it was
-// already echoed locally while being typed. If the output diverges from the
-// expected echo, everything held back is passed through untouched.
-type echoFilter struct {
-	mu      sync.Mutex
-	pending []byte
-	held    []byte
-}
-
-func (f *echoFilter) expect(line string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.pending = []byte(line)
-	f.held = nil
-}
-
-func (f *echoFilter) filter(p []byte) []byte {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	var out []byte
-	for i, b := range p {
-		if len(f.pending) == 0 {
-			return append(out, p[i:]...)
-		}
-		switch {
-		case b == f.pending[0]:
-			f.held = append(f.held, b)
-			f.pending = f.pending[1:]
-			if len(f.pending) == 0 {
-				f.held = nil
-			}
-		case b == '\r' && f.pending[0] == '\n':
-			f.held = append(f.held, b)
-		default:
-			out = append(out, f.held...)
-			out = append(out, b)
-			f.held = nil
-			f.pending = nil
-		}
-	}
-	return out
 }
 
 // crlfWriter turns bare "\n" into "\r\n", which raw mode no longer does for us.
@@ -375,73 +271,4 @@ func (c *crlfWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
-}
-
-// psQuote quotes s as a PowerShell single-quoted string literal.
-func psQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
-func runPS(client *winrm.Client, script string) (string, error) {
-	stdout, stderr, _, err := client.RunPSWithContext(context.Background(), script)
-	if err != nil {
-		return "", err
-	} else if stderr != "" {
-		return "", errors.New(stderr)
-	}
-	return stdout, nil
-}
-
-func uploadFile(client *winrm.Client, out io.Writer, localPath, remotePath string) error {
-	data, err := os.ReadFile(localPath)
-	if err != nil {
-		return err
-	}
-
-	// Create or truncate, so empty files still get created
-	_, err = runPS(client, fmt.Sprintf("[System.IO.File]::WriteAllBytes(%s, [byte[]]@())", psQuote(remotePath)))
-	if err != nil {
-		return err
-	}
-
-	// Chunk size (stay well under 8KB command limit)
-	chunkSize := 5000
-
-	for i := 0; i < len(data); i += chunkSize {
-		end := min(i+chunkSize, len(data))
-		encoded := base64.StdEncoding.EncodeToString(data[i:end])
-
-		_, err := runPS(client, fmt.Sprintf(`
-            $data = [System.Convert]::FromBase64String('%s')
-            Add-Content -Path %s -Value $data -Encoding Byte
-        `, encoded, psQuote(remotePath)))
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "%s: %d%% (%d/%d) bytes uploaded\n", remotePath, end*100/len(data), end, len(data))
-	}
-
-	return nil
-}
-
-func downloadFile(client *winrm.Client, out io.Writer, remotePath, localPath string) error {
-	// Read and encode on remote side
-	stdout, err := runPS(client, fmt.Sprintf(`
-        $data = [System.IO.File]::ReadAllBytes(%s)
-        [System.Convert]::ToBase64String($data)
-    `, psQuote(remotePath)))
-	if err != nil {
-		return err
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(stdout))
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(localPath, decoded, 0600); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "%s: %d bytes downloaded\n", localPath, len(decoded))
-	return nil
 }
