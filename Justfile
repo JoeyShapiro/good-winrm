@@ -10,8 +10,7 @@ setup:
 vm:
     qemu-system-x86_64 \
         -machine q35 \
-        -m 8100 \
-        -display none \
+        -m 10100 \
         -smp 6 \
         -drive file=testfiles/windows-core-2016.qcow2,format=qcow2 \
         -net nic -net user,hostfwd=tcp::5985-:5985,hostfwd=tcp::5986-:5986
@@ -21,3 +20,5 @@ build:
 
 release:
     go build -ldflags="-s -w" ./cmd/good-winrm
+    GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o good-winrm.windows-x86_64.exe ./cmd/good-winrm
+    GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o good-winrm.linux-x86_64 ./cmd/good-winrm
