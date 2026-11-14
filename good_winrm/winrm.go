@@ -3,7 +3,6 @@ package good_winrm
 import (
 	"context"
 	"errors"
-	"io"
 	"sync"
 
 	"github.com/masterzen/winrm"
@@ -39,9 +38,7 @@ type WinrmConnection struct {
 
 	editor lineedit.Editor
 	echo   echoFilter
-
-	output chan []byte
-	done   chan struct{} // closed once remote stdout and stderr have ended
+	output *connection.Output
 }
 
 func NewWinrm(host string, port int, username, password, command string) (*WinrmConnection, error) {
@@ -72,58 +69,23 @@ func NewWinrm(host string, port int, username, password, command string) (*Winrm
 		client: client,
 		shell:  shell,
 		cmd:    cmd,
-		output: make(chan []byte, 16),
-		done:   make(chan struct{}),
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		c.pump(cmd.Stdout, c.echo.filter)
-	}()
-	go func() {
-		defer wg.Done()
-		c.pump(cmd.Stderr, func(p []byte) []byte { return append([]byte(nil), p...) })
-	}()
-	go func() {
-		wg.Wait()
-		close(c.done)
-	}()
+	// The remote has no terminal, so nothing turns its bare "\n" into "\r\n"
+	var stdoutCRLF, stderrCRLF lineedit.CRLF
+	c.output = connection.NewOutput(
+		connection.Stream{Reader: cmd.Stdout, Transform: func(p []byte) []byte {
+			return stdoutCRLF.Convert(c.echo.filter(p))
+		}},
+		connection.Stream{Reader: cmd.Stderr, Transform: stderrCRLF.Convert},
+	)
 
 	return c, nil
 }
 
-// pump forwards a remote stream to Receive.
-func (c *WinrmConnection) pump(r io.Reader, transform func([]byte) []byte) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if out := transform(buf[:n]); len(out) > 0 {
-				c.output <- out
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-// emit queues locally generated output, such as the echo of typed keys.
-func (c *WinrmConnection) emit(p []byte) {
-	if len(p) == 0 {
-		return
-	}
-	select {
-	case c.output <- p:
-	case <-c.done:
-	}
-}
-
 func (c *WinrmConnection) Send(p []byte) error {
 	echo, events := c.editor.Feed(p)
-	c.emit(echo)
+	c.output.Emit(echo)
 
 	for _, ev := range events {
 		switch ev.Kind {
@@ -144,18 +106,7 @@ func (c *WinrmConnection) Send(p []byte) error {
 }
 
 func (c *WinrmConnection) Receive() ([]byte, error) {
-	select {
-	case p := <-c.output:
-		return p, nil
-	case <-c.done:
-		// Drain anything queued before the streams ended
-		select {
-		case p := <-c.output:
-			return p, nil
-		default:
-			return nil, io.EOF
-		}
-	}
+	return c.output.Receive()
 }
 
 func (c *WinrmConnection) Close() error {

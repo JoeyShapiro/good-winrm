@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"good-winrm/connection"
+	"good-winrm/good_ssh"
 	"good-winrm/good_winrm"
 	"good-winrm/lineedit"
 )
@@ -22,7 +23,7 @@ import (
 // Ctrl+` toggles the meta terminal. Terminals send it as NUL.
 const keyMetaToggle = 0x00
 
-const metaPrompt = "\033[32m(good-winrm)\033[0m "
+const metaPrompt = "\033[32m(rem)\033[0m "
 
 func main() {
 	if err := run(); err != nil {
@@ -32,27 +33,31 @@ func main() {
 }
 
 func run() error {
-	fs := flag.NewFlagSet("good-winrm", flag.ExitOnError)
-	port := fs.Int("port", 5985, "WinRM port")
-	command := fs.String("command", "powershell.exe", "Command to execute")
+	fs := flag.NewFlagSet("rem", flag.ExitOnError)
+	port := fs.Int("port", 0, "Port (default 5985 for winrm, 22 for ssh)")
+	command := fs.String("command", "", "Command to execute (default powershell.exe for winrm, a login shell for ssh)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: good-winrm [user@]host [--port 5985] [--command powershell.exe]\n")
+		fmt.Fprintf(os.Stderr, "usage: rem <winrm|ssh> [user@]host [--port N] [--command CMD]\n")
 		fs.PrintDefaults()
 	}
 
-	// flag stops at the first positional argument, so parse again after it
-	// to allow flags on either side of the destination.
-	fs.Parse(os.Args[1:])
-	if fs.NArg() < 1 {
+	// flag stops at the first positional argument, so keep parsing after
+	// each one to allow flags anywhere.
+	var positional []string
+	rest := os.Args[1:]
+	for {
+		fs.Parse(rest)
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		rest = fs.Args()[1:]
+	}
+	if len(positional) != 2 {
 		fs.Usage()
 		os.Exit(2)
 	}
-	destination := fs.Arg(0)
-	fs.Parse(fs.Args()[1:])
-	if fs.NArg() > 0 {
-		fs.Usage()
-		os.Exit(2)
-	}
+	protocol, destination := positional[0], positional[1]
 
 	username, host, err := parseDestination(destination)
 	if err != nil {
@@ -64,16 +69,34 @@ func run() error {
 		return errors.New("stdin must be a terminal")
 	}
 
-	fmt.Fprintf(os.Stderr, "%s@%s's password: ", username, host)
-	password, err := term.ReadPassword(stdinFd)
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return err
-	}
-
-	conn, err := good_winrm.NewWinrm(host, *port, username, string(password), *command)
-	if err != nil {
-		return err
+	var conn connection.Connection
+	switch protocol {
+	case "winrm":
+		if *port == 0 {
+			*port = 5985
+		}
+		if *command == "" {
+			*command = "powershell.exe"
+		}
+		password, err := prompt(fmt.Sprintf("%s@%s's password: ", username, host), false)
+		if err != nil {
+			return err
+		}
+		conn, err = good_winrm.NewWinrm(host, *port, username, password, *command)
+		if err != nil {
+			return err
+		}
+	case "ssh":
+		if *port == 0 {
+			*port = 22
+		}
+		conn, err = good_ssh.NewSsh(host, *port, username, *command, prompt)
+		if err != nil {
+			return err
+		}
+	default:
+		fs.Usage()
+		os.Exit(2)
 	}
 	defer conn.Close()
 
@@ -83,9 +106,17 @@ func run() error {
 	}
 	defer term.Restore(stdinFd, oldState)
 
+	// The connection's output goes to the terminal untouched, while the meta
+	// terminal's own output needs "\r\n" in raw mode
 	t := &terminal{
 		conn: conn,
 		out:  &crlfWriter{w: os.Stdout},
+	}
+
+	if r, ok := conn.(connection.Resizer); ok {
+		go watchResize(int(os.Stdout.Fd()), func(width, height int) {
+			r.Resize(width, height)
+		})
 	}
 
 	remoteDone := make(chan error, 1)
@@ -96,7 +127,7 @@ func run() error {
 				remoteDone <- err
 				return
 			}
-			t.out.Write(p)
+			os.Stdout.Write(p)
 		}
 	}()
 
@@ -130,6 +161,30 @@ func run() error {
 				return err
 			}
 		}
+	}
+}
+
+// prompt asks a question on the terminal before it is in raw mode, hiding
+// the answer unless echo is set.
+func prompt(question string, echo bool) (string, error) {
+	fmt.Fprint(os.Stderr, question)
+	if !echo {
+		answer, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		return string(answer), err
+	}
+
+	// Read a byte at a time so nothing past the newline is consumed
+	var answer []byte
+	b := make([]byte, 1)
+	for {
+		if _, err := os.Stdin.Read(b); err != nil {
+			return "", err
+		}
+		if b[0] == '\n' {
+			return strings.TrimRight(string(answer), "\r"), nil
+		}
+		answer = append(answer, b[0])
 	}
 }
 
@@ -252,22 +307,14 @@ func (t *terminal) evalMetaCommand(input string) error {
 type crlfWriter struct {
 	mu   sync.Mutex
 	w    io.Writer
-	last byte
+	crlf lineedit.CRLF
 }
 
 func (c *crlfWriter) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	buf := make([]byte, 0, len(p))
-	for _, b := range p {
-		if b == '\n' && c.last != '\r' {
-			buf = append(buf, '\r')
-		}
-		buf = append(buf, b)
-		c.last = b
-	}
-	if _, err := c.w.Write(buf); err != nil {
+	if _, err := c.w.Write(c.crlf.Convert(p)); err != nil {
 		return 0, err
 	}
 	return len(p), nil

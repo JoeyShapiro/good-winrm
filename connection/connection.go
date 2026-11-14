@@ -21,3 +21,9 @@ type Uploader interface {
 type Downloader interface {
 	Download(remotePath, localPath string, progress io.Writer) error
 }
+
+// Resizer is a Connection with a remote terminal that should follow the
+// local terminal's size.
+type Resizer interface {
+	Resize(width, height int) error
+}
