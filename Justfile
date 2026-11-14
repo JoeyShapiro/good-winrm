@@ -15,6 +15,10 @@ vm:
         -drive file=testfiles/windows-core-2016.qcow2,format=qcow2 \
         -net nic -net user,hostfwd=tcp::5985-:5985,hostfwd=tcp::5986-:5986
 
+ssh:
+    docker run --rm -it -p 22:22 \
+        alpine sh -c 'apk add --no-cache openssh && ssh-keygen -A && echo "root:test" | chpasswd && exec /usr/sbin/sshd -D -e -o PermitRootLogin=yes'
+
 build:
     go build ./cmd/good-winrm
 
