@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"good-winrm/connection"
+	"good-winrm/good_serial"
 	"good-winrm/good_ssh"
 	"good-winrm/good_winrm"
 	"good-winrm/lineedit"
@@ -22,6 +23,9 @@ import (
 
 // Ctrl+` toggles the meta terminal. Terminals send it as NUL.
 const keyMetaToggle = 0x00
+
+// errQuit ends the session from the meta terminal.
+var errQuit = errors.New("quit")
 
 const metaPrompt = "\033[32m(rem)\033[0m "
 
@@ -36,8 +40,11 @@ func run() error {
 	fs := flag.NewFlagSet("rem", flag.ExitOnError)
 	port := fs.Int("port", 0, "Port (default 5985 for winrm, 22 for ssh)")
 	command := fs.String("command", "", "Command to execute (default powershell.exe for winrm, a login shell for ssh)")
+	baud := fs.Int("baud", 115200, "Baud rate for serial")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: rem <winrm|ssh> [user@]host [--port N] [--command CMD]\n")
+		fmt.Fprintf(os.Stderr, "usage: rem winrm [user@]host [--port N] [--command CMD]\n")
+		fmt.Fprintf(os.Stderr, "       rem ssh [user@]host [--port N] [--command CMD]\n")
+		fmt.Fprintf(os.Stderr, "       rem serial device [--baud RATE]\n")
 		fs.PrintDefaults()
 	}
 
@@ -59,19 +66,19 @@ func run() error {
 	}
 	protocol, destination := positional[0], positional[1]
 
-	username, host, err := parseDestination(destination)
-	if err != nil {
-		return err
-	}
-
 	stdinFd := int(os.Stdin.Fd())
 	if !term.IsTerminal(stdinFd) {
 		return errors.New("stdin must be a terminal")
 	}
 
 	var conn connection.Connection
+	var err error
 	switch protocol {
 	case "winrm":
+		username, host, err := parseDestination(destination)
+		if err != nil {
+			return err
+		}
 		if *port == 0 {
 			*port = 5985
 		}
@@ -87,10 +94,19 @@ func run() error {
 			return err
 		}
 	case "ssh":
+		username, host, err := parseDestination(destination)
+		if err != nil {
+			return err
+		}
 		if *port == 0 {
 			*port = 22
 		}
 		conn, err = good_ssh.NewSsh(host, *port, username, *command, prompt)
+		if err != nil {
+			return err
+		}
+	case "serial":
+		conn, err = good_serial.NewSerial(destination, *baud)
 		if err != nil {
 			return err
 		}
@@ -157,7 +173,9 @@ func run() error {
 			if !ok {
 				return nil
 			}
-			if err := t.handleInput(p); err != nil {
+			if err := t.handleInput(p); errors.Is(err, errQuit) {
+				return nil
+			} else if err != nil {
 				return err
 			}
 		}
@@ -252,7 +270,9 @@ func (t *terminal) send(p []byte) error {
 	for _, ev := range events {
 		switch ev.Kind {
 		case lineedit.Line:
-			if err := t.evalMetaCommand(ev.Line); err != nil {
+			if err := t.evalMetaCommand(ev.Line); errors.Is(err, errQuit) {
+				return err
+			} else if err != nil {
 				fmt.Fprintf(t.out, "error: %v\n", err)
 			}
 		case lineedit.EOF:
@@ -279,6 +299,8 @@ func (t *terminal) evalMetaCommand(input string) error {
 	switch args[0] {
 	case "exit":
 		t.meta = false
+	case "quit", "bye":
+		return errQuit
 	case "upload":
 		if len(args) != 3 {
 			return errors.New("usage: upload <local_path> <remote_path>")

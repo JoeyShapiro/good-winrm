@@ -7,7 +7,7 @@ require (
 	golang.org/x/term v0.40.0
 )
 
-require golang.org/x/sys v0.41.0 // indirect
+require golang.org/x/sys v0.41.0
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.2-0.20260824092057-1c8077778c2c // indirect
