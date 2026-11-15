@@ -31,17 +31,31 @@ func NewSerial(device string, baud int) (*SerialConnection, error) {
 }
 
 func (c *SerialConnection) Send(p []byte) error {
-	_, err := c.port.Write(p)
-	return err
+	if _, err := c.port.Write(p); err != nil {
+		return disconnected(err)
+	}
+	return nil
 }
 
-// Receive only ends if the device goes away, such as being unplugged.
+// Receive only ends if the device goes away, such as being unplugged or
+// rebooting, so that is always a disconnect.
 func (c *SerialConnection) Receive() ([]byte, error) {
-	return c.output.Receive()
+	p, err := c.output.Receive()
+	if err != nil {
+		return nil, disconnected(err)
+	}
+	return p, nil
 }
 
 func (c *SerialConnection) Close() error {
 	return c.port.Close()
+}
+
+func disconnected(err error) error {
+	if err == io.EOF {
+		return fmt.Errorf("%w: device closed", connection.ErrDisconnected)
+	}
+	return fmt.Errorf("%w: %w", connection.ErrDisconnected, err)
 }
 
 func unsupportedBaud(baud int) error {

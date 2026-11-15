@@ -1,13 +1,22 @@
 package connection
 
-import "io"
+import (
+	"errors"
+	"io"
+)
+
+// ErrDisconnected is returned (wrapped) by Send or Receive when the
+// connection was lost, as opposed to the remote ending the session, and
+// reconnecting is worth trying.
+var ErrDisconnected = errors.New("disconnected")
 
 // Connection is a remote session driven by a raw-mode terminal.
 type Connection interface {
 	// Send passes raw terminal input (keystrokes, pastes) to the remote.
 	Send(p []byte) error
 	// Receive blocks for the next chunk of output to show on the terminal.
-	// It returns io.EOF once the remote session has ended.
+	// It returns io.EOF once the remote session has ended, or an error
+	// wrapping ErrDisconnected if the connection was lost.
 	Receive() ([]byte, error)
 	Close() error
 }

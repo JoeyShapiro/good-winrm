@@ -17,6 +17,9 @@ type Stream struct {
 type Output struct {
 	ch   chan []byte
 	done chan struct{} // closed once every stream has ended
+
+	mu  sync.Mutex
+	err error // first read error other than io.EOF
 }
 
 func NewOutput(streams ...Stream) *Output {
@@ -56,6 +59,13 @@ func (o *Output) pump(s Stream) {
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				o.mu.Lock()
+				if o.err == nil {
+					o.err = err
+				}
+				o.mu.Unlock()
+			}
 			return
 		}
 	}
@@ -72,7 +82,8 @@ func (o *Output) Emit(p []byte) {
 	}
 }
 
-// Receive returns the next chunk, or io.EOF once every stream has ended.
+// Receive returns the next chunk. Once every stream has ended it returns the
+// first read error, or io.EOF if they all ended cleanly.
 func (o *Output) Receive() ([]byte, error) {
 	select {
 	case p := <-o.ch:
@@ -83,6 +94,11 @@ func (o *Output) Receive() ([]byte, error) {
 		case p := <-o.ch:
 			return p, nil
 		default:
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if o.err != nil {
+				return nil, o.err
+			}
 			return nil, io.EOF
 		}
 	}
