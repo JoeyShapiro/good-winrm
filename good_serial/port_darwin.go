@@ -1,6 +1,10 @@
 package good_serial
 
-import "golang.org/x/sys/unix"
+import (
+	"path/filepath"
+
+	"golang.org/x/sys/unix"
+)
 
 const (
 	ioctlGetTermios = unix.TIOCGETA
@@ -23,4 +27,9 @@ func setSpeed(t *unix.Termios, baud int) error {
 		}
 	}
 	return unsupportedBaud(baud)
+}
+
+// Only the cu.* devices: the matching tty.* ones wait for carrier detect.
+func listPorts() ([]string, error) {
+	return filepath.Glob("/dev/cu.*")
 }

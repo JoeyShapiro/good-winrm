@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"good-winrm/connection"
 )
@@ -60,4 +61,11 @@ func disconnected(err error) error {
 
 func unsupportedBaud(baud int) error {
 	return fmt.Errorf("baud rate %d: %w (non-standard rates are unimplemented)", baud, errors.ErrUnsupported)
+}
+
+// ListPorts returns the serial devices currently present.
+func ListPorts() ([]string, error) {
+	ports, err := listPorts()
+	slices.Sort(ports)
+	return ports, err
 }

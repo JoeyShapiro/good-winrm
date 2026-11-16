@@ -1,6 +1,10 @@
 package good_serial
 
-import "golang.org/x/sys/unix"
+import (
+	"path/filepath"
+
+	"golang.org/x/sys/unix"
+)
 
 const (
 	ioctlGetTermios = unix.TCGETS
@@ -31,4 +35,19 @@ func setSpeed(t *unix.Termios, baud int) error {
 	t.Ispeed = speed
 	t.Ospeed = speed
 	return nil
+}
+
+// USB serial adapters (ttyUSB), CDC-ACM devices (ttyACM), Raspberry Pi
+// UARTs (ttyAMA) and Bluetooth serial (rfcomm). ttyS* are left out, since
+// they exist whether or not anything is wired to them.
+func listPorts() ([]string, error) {
+	var ports []string
+	for _, pattern := range []string{"/dev/ttyUSB*", "/dev/ttyACM*", "/dev/ttyAMA*", "/dev/rfcomm*"} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+		ports = append(ports, matches...)
+	}
+	return ports, nil
 }

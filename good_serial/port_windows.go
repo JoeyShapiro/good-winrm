@@ -1,12 +1,14 @@
 package good_serial
 
 import (
+	"errors"
 	"io"
 	"slices"
 	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 var standardBauds = []int{
@@ -93,4 +95,28 @@ func (p *port) Close() error {
 	// A blocked ReadFile would otherwise keep CloseHandle waiting
 	windows.CancelIoEx(p.handle, nil)
 	return windows.CloseHandle(p.handle)
+}
+
+// Windows lists present COM ports in the registry.
+func listPorts() ([]string, error) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `HARDWARE\DEVICEMAP\SERIALCOMM`, registry.QUERY_VALUE)
+	if errors.Is(err, registry.ErrNotExist) {
+		// Created only once a port has existed
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	defer key.Close()
+
+	names, err := key.ReadValueNames(0)
+	if err != nil {
+		return nil, err
+	}
+	var ports []string
+	for _, name := range names {
+		if port, _, err := key.GetStringValue(name); err == nil {
+			ports = append(ports, port)
+		}
+	}
+	return ports, nil
 }
