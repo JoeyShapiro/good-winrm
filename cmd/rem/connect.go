@@ -45,6 +45,7 @@ func runConnect(args []string) error {
 	command := fs.String("command", "", "Command to execute (default powershell.exe for winrm, a login shell for ssh)")
 	baud := fs.Int("baud", 0, "Baud rate for serial (default 115200)")
 	credName := fs.String("cred", "", "Saved cred to log in with")
+	userFlag := fs.String("user", "", "Username to log in with, prompting for the password")
 	positional := parseArgs(fs, args)
 
 	var c connInfo
@@ -53,11 +54,23 @@ func runConnect(args []string) error {
 	switch len(positional) {
 	case 1:
 		name = positional[0]
+		var username string
+		if i := strings.LastIndex(name, "@"); i >= 0 {
+			username, name = name[:i], name[i+1:]
+			if username == "" || name == "" {
+				return fmt.Errorf("invalid destination: %q", positional[0])
+			}
+			// Leaves room for rem user@host to mean a host that isn't saved
+			if looksLikeHost(name) {
+				return fmt.Errorf("%q is ambiguous: it's a host as well as a target name; use rem %s --user %s, or rem <winrm|ssh> %s", positional[0], name, username, positional[0])
+			}
+			explicitUser = true
+		}
 		t, err := savedTarget(name)
 		if err != nil {
 			return err
 		}
-		c = connInfo{kind: t.Type, address: t.Address, port: t.Port}
+		c = connInfo{kind: t.Type, address: t.Address, port: t.Port, username: username}
 	case 2:
 		kind, destination := positional[0], positional[1]
 		name = destination
@@ -77,7 +90,18 @@ func runConnect(args []string) error {
 		exitUsage(fs)
 	}
 
-	if *credName != "" {
+	if *userFlag != "" {
+		if c.kind == "serial" {
+			return errors.New("serial connections don't log in, so --user doesn't apply")
+		}
+		if explicitUser {
+			return errors.New("give either user@host or --user, not both")
+		}
+		if *credName != "" {
+			return errors.New("give either --cred or --user, not both")
+		}
+		c.username = *userFlag
+	} else if *credName != "" {
 		if c.kind == "serial" {
 			return errors.New("serial connections don't log in, so --cred doesn't apply")
 		}

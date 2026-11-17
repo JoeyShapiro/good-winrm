@@ -6,9 +6,9 @@ import (
 	"os"
 )
 
-const usage = `usage: rem <target> [--cred NAME] [--port N] [--command CMD]
-       rem winrm [user@]host [--cred NAME] [--port N] [--command CMD]
-       rem ssh [user@]host [--cred NAME] [--port N] [--command CMD]
+const usage = `usage: rem [user@]<target> [--cred NAME | --user USER] [--port N] [--command CMD]
+       rem winrm [user@]host [--cred NAME | --user USER] [--port N] [--command CMD]
+       rem ssh [user@]host [--cred NAME | --user USER] [--port N] [--command CMD]
        rem serial device [--baud RATE]
        rem add target <name> <winrm|ssh> <address> [--port N]
        rem add cred <name> <username>

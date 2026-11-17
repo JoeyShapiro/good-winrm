@@ -170,6 +170,9 @@ func checkName(name string) error {
 		return errors.New("name can't be empty")
 	case strings.HasPrefix(name, "-"):
 		return fmt.Errorf("name %q can't start with -", name)
+	case strings.Contains(name, "@"):
+		// It would read as user@target
+		return fmt.Errorf("name %q can't contain @", name)
 	case slices.Contains(reserved, name):
 		return fmt.Errorf("%q is reserved (%s)", name, strings.Join(reserved, ", "))
 	}
