@@ -11,12 +11,25 @@ import (
 
 // Runs against the test VM (just vm), and is skipped when it isn't up.
 // REM_TEST_WINRM_HOST and REM_TEST_WINRM_PASSWORD point it somewhere else.
-func testConnection(t *testing.T) *WinrmConnection {
+// testConn is a connection with one goroutine receiving from it for its
+// whole life. A reader per waitFor would leave each one blocked in Receive
+// after it returns, to take and drop the next chunk.
+type testConn struct {
+	*WinrmConnection
+	chunks chan chunk
+}
+
+type chunk struct {
+	p   []byte
+	err error
+}
+
+func testConnection(t *testing.T) *testConn {
 	t.Helper()
 	return testConnectionRunning(t, "powershell.exe")
 }
 
-func testConnectionRunning(t *testing.T, command string) *WinrmConnection {
+func testConnectionRunning(t *testing.T, command string) *testConn {
 	t.Helper()
 	host := envOr("REM_TEST_WINRM_HOST", "localhost")
 	password := envOr("REM_TEST_WINRM_PASSWORD", "")
@@ -30,7 +43,18 @@ func testConnectionRunning(t *testing.T, command string) *WinrmConnection {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	return c
+
+	tc := &testConn{WinrmConnection: c, chunks: make(chan chunk, 64)}
+	go func() {
+		for {
+			p, err := c.Receive()
+			tc.chunks <- chunk{p, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return tc
 }
 
 func envOr(key, fallback string) string {
@@ -41,34 +65,13 @@ func envOr(key, fallback string) string {
 }
 
 // waitFor receives until the output contains want, failing after timeout.
-func waitFor(t *testing.T, c *WinrmConnection, want string, timeout time.Duration) string {
+func waitFor(t *testing.T, c *testConn, want string, timeout time.Duration) string {
 	t.Helper()
-	type chunk struct {
-		p   []byte
-		err error
-	}
-	chunks := make(chan chunk)
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			p, err := c.Receive()
-			select {
-			case chunks <- chunk{p, err}:
-			case <-stop:
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	var out strings.Builder
 	deadline := time.After(timeout)
 	for {
 		select {
-		case ch := <-chunks:
+		case ch := <-c.chunks:
 			if ch.err != nil {
 				t.Fatalf("receive: %v (output so far %q)", ch.err, out.String())
 			}
