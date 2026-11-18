@@ -13,10 +13,15 @@ import (
 // REM_TEST_WINRM_HOST and REM_TEST_WINRM_PASSWORD point it somewhere else.
 func testConnection(t *testing.T) *WinrmConnection {
 	t.Helper()
+	return testConnectionRunning(t, "powershell.exe")
+}
+
+func testConnectionRunning(t *testing.T, command string) *WinrmConnection {
+	t.Helper()
 	host := envOr("REM_TEST_WINRM_HOST", "localhost")
 	password := envOr("REM_TEST_WINRM_PASSWORD", "")
 
-	c, err := NewWinrm(host, 5985, "Administrator", password, "powershell.exe")
+	c, err := NewWinrm(host, 5985, "Administrator", password, command)
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
 		t.Skipf("no WinRM on %s: %v", host, err)
@@ -105,5 +110,41 @@ func TestWinrmInputWhilePolling(t *testing.T) {
 		t.Error("the input request waited for the poll: requests to the server are being serialized")
 	case output > 10*time.Second:
 		t.Error("the input was accepted, but its output waited for the poll to time out: the server isn't answering a waiting poll when output appears")
+	}
+}
+
+// Tries sending a line at different times, with different line endings and
+// to different shells, to find which ones a server runs. Each case reports
+// on its own, so the pattern of passes and failures is the answer.
+func TestWinrmInputMatrix(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		prompt  string        // waited for before sending; empty sends at once
+		idle    time.Duration // after the prompt, before sending
+		line    string
+	}{
+		{"powershell/before prompt/LF", "powershell.exe", "", 0, "6*7\n"},
+		{"powershell/at prompt/LF", "powershell.exe", "PS ", 0, "6*7\n"},
+		{"powershell/idle 3s/LF", "powershell.exe", "PS ", 3 * time.Second, "6*7\n"},
+		{"powershell/idle 3s/CRLF", "powershell.exe", "PS ", 3 * time.Second, "6*7\r\n"},
+		{"cmd/before prompt/CRLF", "cmd.exe", "", 0, "set /a 6*7\r\n"},
+		{"cmd/idle 3s/LF", "cmd.exe", ">", 3 * time.Second, "set /a 6*7\n"},
+		{"cmd/idle 3s/CRLF", "cmd.exe", ">", 3 * time.Second, "set /a 6*7\r\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testConnectionRunning(t, tc.command)
+			if tc.prompt != "" {
+				waitFor(t, c, tc.prompt, 60*time.Second)
+				time.Sleep(tc.idle)
+			}
+			if err := c.sendInput([]byte(tc.line), false); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			waitFor(t, c, "42", 20*time.Second)
+			t.Logf("output after %v", time.Since(start))
+		})
 	}
 }
