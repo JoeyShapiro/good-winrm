@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 
@@ -19,6 +21,8 @@ var (
 	_ connection.Uploader   = (*SshConnection)(nil)
 	_ connection.Downloader = (*SshConnection)(nil)
 )
+
+var errOutOfAttempts = errors.New("out of password attempts")
 
 // Prompt asks the user a question while connecting, before the terminal is
 // in raw mode. echo is false for secrets such as passwords.
@@ -36,7 +40,9 @@ type SshConnection struct {
 
 // NewSsh connects with password or keyboard-interactive auth, checking the
 // host key against ~/.ssh/known_hosts. An empty command starts a login shell.
-func NewSsh(host string, port int, username, command string, prompt Prompt) (*SshConnection, error) {
+// The password is asked for up to attempts times, across both ways of
+// asking.
+func NewSsh(host string, port int, username, command string, prompt Prompt, attempts int) (*SshConnection, error) {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	hostKeys, err := newHostKeyChecker(prompt)
@@ -44,19 +50,48 @@ func NewSsh(host string, port int, username, command string, prompt Prompt) (*Ss
 		return nil, err
 	}
 
+	// Counts each time hidden answers are asked for, by either method
+	asked := 0
+	askHidden := func() error {
+		if asked == attempts {
+			// Makes the client give up on this method, and so the login
+			return errOutOfAttempts
+		}
+		asked++
+		return nil
+	}
+	retry := func(question string) string {
+		if asked > 1 {
+			return "Permission denied, please try again.\n" + question
+		}
+		return question
+	}
+
 	config := &ssh.ClientConfig{
 		User: username,
 		Auth: []ssh.AuthMethod{
-			ssh.PasswordCallback(func() (string, error) {
-				return prompt(fmt.Sprintf("%s@%s's password: ", username, host), false)
-			}),
+			ssh.RetryableAuthMethod(ssh.PasswordCallback(func() (string, error) {
+				if err := askHidden(); err != nil {
+					return "", err
+				}
+				return prompt(retry(fmt.Sprintf("%s@%s's password: ", username, host)), false)
+			}), attempts),
 			// Servers using PAM usually ask for the password this way, with
 			// their own prompt text
-			ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+			ssh.RetryableAuthMethod(ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+				// Servers can send messages with no questions at all
+				if slices.Contains(echos, false) {
+					if err := askHidden(); err != nil {
+						return nil, err
+					}
+				}
 				answers := make([]string, len(questions))
 				for i, q := range questions {
 					if i == 0 && instruction != "" {
 						q = instruction + "\n" + q
+					}
+					if i == 0 {
+						q = retry(q)
 					}
 					answer, err := prompt(q, echos[i])
 					if err != nil {
@@ -65,14 +100,16 @@ func NewSsh(host string, port int, username, command string, prompt Prompt) (*Ss
 					answers[i] = answer
 				}
 				return answers, nil
-			}),
+			}), attempts),
 		},
 		HostKeyCallback:   hostKeys.check,
 		HostKeyAlgorithms: hostKeys.algorithms(addr),
 	}
 
 	client, err := ssh.Dial("tcp", addr, config)
-	if err != nil {
+	if err != nil && (errors.Is(err, errOutOfAttempts) || strings.Contains(err.Error(), "unable to authenticate")) {
+		return nil, connection.ErrUnauthorized
+	} else if err != nil {
 		return nil, err
 	}
 

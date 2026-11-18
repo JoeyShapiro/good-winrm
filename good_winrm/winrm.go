@@ -35,6 +35,13 @@ var (
 	_ connection.Downloader = (*WinrmConnection)(nil)
 )
 
+// unauthorized reports whether err is the server rejecting the login. The
+// library only says so in the error text.
+func unauthorized(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "http 401") || strings.Contains(s, "http error 401")
+}
+
 // WinrmConnection runs a command over WinRM. WinRM has no terminal on the
 // remote side, so input is line-edited and echoed locally, and only whole
 // lines are sent.
@@ -83,7 +90,9 @@ func NewWinrm(host string, port int, username, password, command string) (*Winrm
 	if err == nil {
 		c.shellID, err = winrm.ParseOpenShellResponse(response)
 	}
-	if err != nil {
+	if err != nil && unauthorized(err) {
+		return nil, connection.ErrUnauthorized
+	} else if err != nil {
 		return nil, err
 	}
 

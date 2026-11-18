@@ -27,6 +27,10 @@ type connInfo struct {
 	command  string
 }
 
+// passwordAttempts is how many times a typed password is asked for, like
+// ssh.
+const passwordAttempts = 3
+
 func defaultPort(kind string) int {
 	switch kind {
 	case "winrm":
@@ -172,8 +176,8 @@ func savedCred(name string) (store.Cred, error) {
 	return c, err
 }
 
-// dialer asks for anything still missing, then returns a function that
-// connects, and can be called again to reconnect.
+// dialer returns a function that connects, asking for anything still
+// missing, and can be called again to reconnect.
 func (c connInfo) dialer() (func() (connection.Connection, error), error) {
 	switch c.kind {
 	case "winrm":
@@ -182,19 +186,37 @@ func (c connInfo) dialer() (func() (connection.Connection, error), error) {
 			command = "powershell.exe"
 		}
 		password := c.password
-		if password == "" {
-			var err error
-			password, err = prompt(fmt.Sprintf("%s@%s's password: ", c.username, c.address), false)
-			if err != nil {
-				return nil, err
-			}
-		}
 		return func() (connection.Connection, error) {
-			return good_winrm.NewWinrm(c.address, c.port, c.username, password, command)
+			if password != "" {
+				conn, err := good_winrm.NewWinrm(c.address, c.port, c.username, password, command)
+				return conn, c.loginErr(err)
+			}
+			// Asked for until it works, like ssh, then kept for reconnecting
+			for attempt := 1; ; attempt++ {
+				typed, err := prompt(fmt.Sprintf("%s@%s's password: ", c.username, c.address), false)
+				if err != nil {
+					return nil, err
+				}
+				conn, err := good_winrm.NewWinrm(c.address, c.port, c.username, typed, command)
+				if errors.Is(err, connection.ErrUnauthorized) {
+					if attempt < passwordAttempts {
+						fmt.Fprintln(os.Stderr, "Permission denied, please try again.")
+						continue
+					}
+					return nil, c.loginErr(err)
+				}
+				if err == nil {
+					password = typed
+				}
+				return conn, err
+			}
 		}, nil
 	case "ssh":
 		ask := good_ssh.Prompt(prompt)
+		attempts := passwordAttempts
 		if c.password != "" {
+			// Retrying a saved password only risks locking the account
+			attempts = 1
 			// Answer hidden questions (the password, whichever way the server
 			// asks) with the saved password; still ask about host keys
 			ask = func(question string, echo bool) (string, error) {
@@ -205,7 +227,8 @@ func (c connInfo) dialer() (func() (connection.Connection, error), error) {
 			}
 		}
 		return func() (connection.Connection, error) {
-			return good_ssh.NewSsh(c.address, c.port, c.username, c.command, ask)
+			conn, err := good_ssh.NewSsh(c.address, c.port, c.username, c.command, ask, attempts)
+			return conn, c.loginErr(err)
 		}, nil
 	case "serial":
 		return func() (connection.Connection, error) {
@@ -213,4 +236,12 @@ func (c connInfo) dialer() (func() (connection.Connection, error), error) {
 		}, nil
 	}
 	return nil, fmt.Errorf("unknown target type %q", c.kind)
+}
+
+// loginErr says who was rejected, if err is a rejected login.
+func (c connInfo) loginErr(err error) error {
+	if errors.Is(err, connection.ErrUnauthorized) {
+		return fmt.Errorf("%s@%s: %w", c.username, c.address, err)
+	}
+	return err
 }

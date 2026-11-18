@@ -10,6 +10,10 @@ import (
 // reconnecting is worth trying.
 var ErrDisconnected = errors.New("disconnected")
 
+// ErrUnauthorized is returned (wrapped) when connecting if the server
+// rejects the username or password.
+var ErrUnauthorized = errors.New("permission denied (wrong username or password)")
+
 // Connection is a remote session driven by a raw-mode terminal.
 type Connection interface {
 	// Send passes raw terminal input (keystrokes, pastes) to the remote.
