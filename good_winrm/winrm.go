@@ -203,9 +203,9 @@ func (c *WinrmConnection) Send(p []byte) error {
 	for _, ev := range events {
 		switch ev.Kind {
 		case lineedit.Line:
-			line := ev.Line + "\n"
-			c.echo.expect(line)
-			if err := c.sendInput([]byte(line), false); err != nil {
+			// Older servers (2008) never run a line ending in a bare "\n"
+			c.echo.expect(ev.Line + "\n")
+			if err := c.sendInput([]byte(ev.Line+"\r\n"), false); err != nil {
 				return err
 			}
 		case lineedit.EOF:

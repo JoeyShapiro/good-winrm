@@ -151,3 +151,17 @@ func TestWinrmInputMatrix(t *testing.T) {
 		})
 	}
 }
+
+// Goes through Send, as typing does, rather than sendInput.
+func TestWinrmTypedLineRuns(t *testing.T) {
+	c := testConnection(t)
+	waitFor(t, c, "PS ", 60*time.Second)
+	time.Sleep(3 * time.Second)
+	if err := c.Send([]byte("6*7\r")); err != nil {
+		t.Fatal(err)
+	}
+	out := waitFor(t, c, "42", 20*time.Second)
+	if strings.Contains(out, "6*76*7") {
+		t.Errorf("the remote's echo wasn't filtered out: %q", out)
+	}
+}
