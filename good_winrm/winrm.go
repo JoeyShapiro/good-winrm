@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/masterzen/winrm"
 	"github.com/masterzen/winrm/soap"
@@ -54,36 +53,9 @@ type WinrmConnection struct {
 	shellID string
 	cmdID   string
 
-	conns  conns
 	editor lineedit.Editor
 	echo   echoFilter
 	output *connection.Output
-}
-
-// conns keeps every TCP connection the transports open, so Close can close
-// them; the transports keep them open forever otherwise.
-type conns struct {
-	mu   sync.Mutex
-	open []net.Conn
-}
-
-func (c *conns) dial(network, addr string) (net.Conn, error) {
-	conn, err := (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).Dial(network, addr)
-	if err == nil {
-		c.mu.Lock()
-		c.open = append(c.open, conn)
-		c.mu.Unlock()
-	}
-	return conn, err
-}
-
-func (c *conns) closeAll() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, conn := range c.open {
-		conn.Close()
-	}
-	c.open = nil
 }
 
 func NewWinrm(host string, port int, username, password, command string) (*WinrmConnection, error) {
@@ -91,13 +63,13 @@ func NewWinrm(host string, port int, username, password, command string) (*Winrm
 		url: fmt.Sprintf("http://%s/wsman", net.JoinHostPort(host, strconv.Itoa(port))),
 	}
 	endpoint := winrm.NewEndpoint(host, port, false, false, nil, nil, nil, 0)
-	params := *winrm.DefaultParameters
+	params := winrm.DefaultParameters
 	params.TransportDecorator = func() winrm.Transporter {
-		return winrm.NewClientNTLMWithDial(c.conns.dial)
+		return &winrm.ClientNTLM{}
 	}
 
 	var err error
-	if c.client, err = winrm.NewClientWithParameters(endpoint, username, password, &params); err != nil {
+	if c.client, err = winrm.NewClientWithParameters(endpoint, username, password, params); err != nil {
 		return nil, err
 	}
 	c.recv, c.send = params.TransportDecorator(), params.TransportDecorator()
@@ -112,7 +84,6 @@ func NewWinrm(host string, port int, username, password, command string) (*Winrm
 		c.shellID, err = winrm.ParseOpenShellResponse(response)
 	}
 	if err != nil {
-		c.conns.closeAll()
 		return nil, err
 	}
 
@@ -122,7 +93,6 @@ func NewWinrm(host string, port int, username, password, command string) (*Winrm
 	}
 	if err != nil {
 		c.deleteShell()
-		c.conns.closeAll()
 		return nil, err
 	}
 
@@ -225,9 +195,7 @@ func (c *WinrmConnection) Receive() ([]byte, error) {
 func (c *WinrmConnection) Close() error {
 	// Terminating the command also ends the outstanding poll
 	_, err := c.post(c.send, winrm.NewSignalRequest(c.url, c.shellID, c.cmdID, &c.client.Parameters))
-	err = errors.Join(err, c.deleteShell())
-	c.conns.closeAll()
-	return err
+	return errors.Join(err, c.deleteShell())
 }
 
 func (c *WinrmConnection) deleteShell() error {
