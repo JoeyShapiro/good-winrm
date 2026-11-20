@@ -9,8 +9,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"golang.org/x/term"
-
 	"good-winrm/good_serial"
 	"good-winrm/store"
 )
@@ -64,12 +62,23 @@ func runAdd(args []string) error {
 		if err := checkName(c.Name); err != nil {
 			return err
 		}
-		// Asked for rather than taken as an argument, to keep it out of shell
-		// history
-		if c.Password, err = askNewPassword(); err != nil {
+		// Before any passwords are typed
+		if _, err := s.Cred(c.Name); err == nil {
+			return fmt.Errorf("cred %q already exists", c.Name)
+		} else if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		return s.AddCred(c)
+
+		key, err := unlockVault(s)
+		if err != nil {
+			return err
+		}
+		// Asked for rather than taken as an argument, to keep it out of shell
+		// history
+		if c.Password, err = askNewPassword(fmt.Sprintf("password for %s", c.Username)); err != nil {
+			return err
+		}
+		return s.AddCred(c, key)
 	}
 	exitUsage(fs)
 	return nil
@@ -180,23 +189,4 @@ func checkName(name string) error {
 		return fmt.Errorf("name %q can't be a number", name)
 	}
 	return nil
-}
-
-// askNewPassword asks twice, like passwd does.
-func askNewPassword() (string, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return "", errors.New("stdin must be a terminal to enter the password")
-	}
-	password, err := prompt("password: ", false)
-	if err != nil {
-		return "", err
-	}
-	again, err := prompt("password again: ", false)
-	if err != nil {
-		return "", err
-	}
-	if password != again {
-		return "", errors.New("passwords don't match")
-	}
-	return password, nil
 }

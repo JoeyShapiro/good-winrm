@@ -13,11 +13,12 @@ const usage = `usage: rem [user@]<target> [--cred NAME | --user USER] [--port N]
        rem add target <name> <winrm|ssh> <address> [--port N]
        rem add cred <name> <username>
        rem remove <target|cred> <name>
+       rem passwd
        rem list
 `
 
 // Words that can't be target or cred names, since they mean something else first.
-var reserved = []string{"add", "remove", "list", "help", "winrm", "ssh", "serial"}
+var reserved = []string{"add", "remove", "list", "passwd", "help", "winrm", "ssh", "serial"}
 
 func main() {
 	if err := run(); err != nil {
@@ -39,6 +40,8 @@ func run() error {
 		return runRemove(args)
 	case "list":
 		return runList(args)
+	case "passwd":
+		return runPasswd(args)
 	case "help", "-h", "-help", "--help":
 		fmt.Print(usage)
 		return nil

@@ -169,10 +169,19 @@ func savedCred(name string) (store.Cred, error) {
 	}
 	defer s.Close()
 
+	// Looked up before asking for the rem password, so a typo fails fast
 	c, err := s.Cred(name)
 	if errors.Is(err, store.ErrNotFound) {
 		return c, fmt.Errorf("no saved cred named %q (see rem list)", name)
+	} else if err != nil {
+		return c, err
 	}
+
+	key, err := unlockVault(s)
+	if err != nil {
+		return c, err
+	}
+	c.Password, err = key.Reveal(c)
 	return c, err
 }
 

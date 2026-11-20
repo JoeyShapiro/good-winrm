@@ -22,11 +22,15 @@ type Target struct {
 	Port    int    // 0 for the type's default
 }
 
-// Cred is a username and password.
+// Cred is a username and password. The password is stored encrypted, see
+// vault.go: it's set to be encrypted by AddCred, but left empty by Cred and
+// Creds, and decrypted with Key.Reveal.
 type Cred struct {
 	Name     string
 	Username string
 	Password string
+
+	nonce, secret []byte
 }
 
 var ErrNotFound = errors.New("not found")
@@ -43,10 +47,20 @@ var migrations = []string{
 		address TEXT NOT NULL,
 		port    INTEGER NOT NULL DEFAULT 0
 	);
+	CREATE TABLE vault (
+		id          INTEGER PRIMARY KEY CHECK (id = 1),
+		salt        BLOB NOT NULL,
+		time        INTEGER NOT NULL,
+		memory      INTEGER NOT NULL, -- KiB
+		threads     INTEGER NOT NULL,
+		nonce       BLOB NOT NULL,
+		wrapped_key BLOB NOT NULL -- the data key, encrypted with the password
+	);
 	CREATE TABLE creds (
 		name     TEXT PRIMARY KEY,
 		username TEXT NOT NULL,
-		password TEXT NOT NULL
+		nonce    BLOB NOT NULL,
+		password BLOB NOT NULL -- encrypted with the data key
 	);`,
 }
 
@@ -73,7 +87,8 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
-	// SQLite would create the file world-readable, and it holds passwords
+	// SQLite would create the file world-readable. Passwords are encrypted,
+	// but there's no need to hand out the ciphertext and usernames either
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
@@ -133,9 +148,10 @@ func (s *Store) AddTarget(t Target) error {
 	return err
 }
 
-func (s *Store) AddCred(c Cred) error {
-	_, err := s.db.Exec("INSERT INTO creds (name, username, password) VALUES (?, ?, ?)",
-		c.Name, c.Username, c.Password)
+func (s *Store) AddCred(c Cred, key *Key) error {
+	nonce, secret := seal(key.aead, []byte(c.Password), credAD(c.Name))
+	_, err := s.db.Exec("INSERT INTO creds (name, username, nonce, password) VALUES (?, ?, ?, ?)",
+		c.Name, c.Username, nonce, secret)
 	if isUniqueErr(err) {
 		return fmt.Errorf("cred %q already exists", c.Name)
 	}
@@ -154,8 +170,8 @@ func (s *Store) Target(name string) (Target, error) {
 
 func (s *Store) Cred(name string) (Cred, error) {
 	var c Cred
-	err := s.db.QueryRow("SELECT name, username, password FROM creds WHERE name = ?", name).
-		Scan(&c.Name, &c.Username, &c.Password)
+	err := s.db.QueryRow("SELECT name, username, nonce, password FROM creds WHERE name = ?", name).
+		Scan(&c.Name, &c.Username, &c.nonce, &c.secret)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, fmt.Errorf("cred %q: %w", name, ErrNotFound)
 	}
@@ -181,7 +197,7 @@ func (s *Store) Targets() ([]Target, error) {
 }
 
 func (s *Store) Creds() ([]Cred, error) {
-	rows, err := s.db.Query("SELECT name, username, password FROM creds ORDER BY name")
+	rows, err := s.db.Query("SELECT name, username, nonce, password FROM creds ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +206,7 @@ func (s *Store) Creds() ([]Cred, error) {
 	var creds []Cred
 	for rows.Next() {
 		var c Cred
-		if err := rows.Scan(&c.Name, &c.Username, &c.Password); err != nil {
+		if err := rows.Scan(&c.Name, &c.Username, &c.nonce, &c.secret); err != nil {
 			return nil, err
 		}
 		creds = append(creds, c)
